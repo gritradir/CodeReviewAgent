@@ -78,7 +78,12 @@ public class GitHubWebhookController : ControllerBase
         }
 
         var pr = payload.PullRequest;
-        var cloneUrl = pr.Head.Repo?.CloneUrl ?? string.Empty;
+
+        if (pr.Head.Repo == null || string.IsNullOrEmpty(pr.Head.Repo.CloneUrl))
+        {
+            _logger.LogWarning("PR #{PrId} has no source repository (fork deleted?), skipping", pr.Number);
+            return Ok(new { status = "skipped", reason = "Source repository is unavailable" });
+        }
 
         var prInfo = new PullRequestInfo
         {
@@ -89,8 +94,8 @@ public class GitHubWebhookController : ControllerBase
             AuthorIdentifier = author,
             SourceBranch = pr.Head.Ref,
             TargetBranch = pr.Base.Ref,
-            RepoName = pr.Head.Repo?.Name ?? "unknown",
-            AuthenticatedCloneUrl = InjectPat(cloneUrl),
+            RepoName = pr.Head.Repo.Name,
+            AuthenticatedCloneUrl = InjectPat(pr.Head.Repo.CloneUrl),
         };
 
         _logger.LogInformation("Processing GitHub PR #{PrId} by {Author}",

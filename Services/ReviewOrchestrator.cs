@@ -66,6 +66,16 @@ public class ReviewOrchestrator : IReviewOrchestrator
 
     public async Task<CodeReviewResult> ProcessPullRequestAsync(PullRequestInfo prInfo)
     {
+        // Validate required fields
+        if (string.IsNullOrWhiteSpace(prInfo.AuthenticatedCloneUrl))
+            throw new InvalidOperationException(
+                $"PR #{prInfo.PullRequestId}: Clone URL is empty — cannot checkout. " +
+                "Check that the source repository exists and the PAT is configured.");
+
+        if (string.IsNullOrWhiteSpace(prInfo.RepoName) || prInfo.RepoName == "unknown")
+            throw new InvalidOperationException(
+                $"PR #{prInfo.PullRequestId}: Repository name is missing or unknown.");
+
         var branchName = prInfo.SourceBranch.Replace("refs/heads/", "");
 
         _logger.LogInformation("Processing PR #{PrId} from branch {Branch} in repo {Repo}",
@@ -79,18 +89,34 @@ public class ReviewOrchestrator : IReviewOrchestrator
 
         try
         {
-            // Step 1: Extract work item key from branch name
-            var workItemKey = _workItemService.ExtractWorkItemKey(branchName);
+            // Step 1: Extract work item key from branch name (optional — branch may not follow convention)
+            string? workItemKey = null;
+            try
+            {
+                workItemKey = _workItemService.ExtractWorkItemKey(branchName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to extract work item key from branch {Branch}, proceeding without it", branchName);
+            }
             result.WorkItemKey = workItemKey;
 
-            // Step 2: Fetch work item details
+            // Step 2: Fetch work item details (optional — review works without it)
             var workItemContext = string.Empty;
             if (!string.IsNullOrEmpty(workItemKey))
             {
                 _logger.LogInformation("Found work item: {WorkItem}", workItemKey);
-                workItemContext = await _workItemService.GetWorkItemContextAsync(workItemKey) ?? string.Empty;
+                try
+                {
+                    workItemContext = await _workItemService.GetWorkItemContextAsync(workItemKey) ?? string.Empty;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to fetch work item {WorkItem}, proceeding without it", workItemKey);
+                }
+
                 if (string.IsNullOrEmpty(workItemContext))
-                    _logger.LogWarning("Could not fetch work item {WorkItem}, proceeding without it", workItemKey);
+                    _logger.LogWarning("No context returned for work item {WorkItem}, proceeding without it", workItemKey);
             }
             else
             {
@@ -98,10 +124,12 @@ public class ReviewOrchestrator : IReviewOrchestrator
             }
 
             // Step 3: Checkout the PR branch (clone URL already has credentials injected)
+            _logger.LogInformation("Checking out branch {Branch} in repo {Repo}", branchName, prInfo.RepoName);
             var repoPath = await _gitService.CheckoutBranchAsync(
                 prInfo.RepoName, prInfo.AuthenticatedCloneUrl, prInfo.SourceBranch);
 
             // Step 4: Get the diff
+            _logger.LogInformation("Computing diff for PR #{PrId}", prInfo.PullRequestId);
             var diff = await _gitService.GetDiffAsync(repoPath, prInfo.TargetBranch, branchName);
 
             if (string.IsNullOrWhiteSpace(diff))
@@ -114,8 +142,17 @@ public class ReviewOrchestrator : IReviewOrchestrator
             }
 
             // Step 5: Build the review prompt and run review engine
+            _logger.LogInformation("Running review engine for PR #{PrId} (diff size: {DiffSize} chars)",
+                prInfo.PullRequestId, diff.Length);
             var prompt = BuildReviewPrompt(prInfo, workItemContext, diff);
             var reviewContent = await _reviewEngine.RunReviewAsync(prompt, repoPath, _systemInstructions);
+
+            if (string.IsNullOrWhiteSpace(reviewContent))
+            {
+                _logger.LogWarning("Review engine returned empty result for PR #{PrId}", prInfo.PullRequestId);
+                reviewContent = "Review engine returned an empty response. Please check engine configuration and logs.";
+            }
+
             result.ReviewContent = reviewContent;
             result.IsSuccess = true;
 

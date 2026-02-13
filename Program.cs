@@ -11,7 +11,7 @@ if (File.Exists(envFile))
         .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith('#'))
         .Select(line => line.Split('=', 2))
         .Where(parts => parts.Length == 2)
-        .ToDictionary(parts => parts[0].Trim(), parts => parts[1].Trim());
+        .ToDictionary(parts => parts[0].Trim().Replace("__", ":"), parts => parts[1].Trim());
 
     builder.Configuration.AddInMemoryCollection(envVars!);
 }

@@ -27,26 +27,34 @@ public class GitService : IGitService
 
     public async Task<string> CheckoutBranchAsync(string repoName, string remoteUrl, string branchName)
     {
+        if (string.IsNullOrWhiteSpace(repoName))
+            throw new ArgumentException("Repository name is required", nameof(repoName));
+        if (string.IsNullOrWhiteSpace(remoteUrl))
+            throw new ArgumentException("Remote URL is required — check that PAT and clone URL are configured", nameof(remoteUrl));
+        if (string.IsNullOrWhiteSpace(branchName))
+            throw new ArgumentException("Branch name is required", nameof(branchName));
+
         Directory.CreateDirectory(_repoBasePath);
         var repoPath = Path.Combine(_repoBasePath, repoName);
 
         if (!Directory.Exists(Path.Combine(repoPath, ".git")))
         {
             _logger.LogInformation("Cloning {RepoName} into {RepoPath}", repoName, repoPath);
-            await RunGitAsync(_repoBasePath, $"clone {remoteUrl} {repoName}");
+            await RunGitAsync(_repoBasePath, $"clone {remoteUrl} {repoName}", throwOnError: true);
         }
         else
         {
             _logger.LogInformation("Fetching latest for {RepoName}", repoName);
-            await RunGitAsync(repoPath, "fetch --all --prune");
+            await RunGitAsync(repoPath, "fetch --all --prune", throwOnError: true);
         }
 
         var localBranch = branchName.Replace("refs/heads/", "");
         _logger.LogInformation("Checking out branch {Branch}", localBranch);
 
-        await RunGitAsync(repoPath, "checkout -- .");
-        await RunGitAsync(repoPath, $"checkout {localBranch}");
-        await RunGitAsync(repoPath, $"pull origin {localBranch}");
+        // Discard any local changes before switching branches
+        await RunGitAsync(repoPath, "checkout -- .", throwOnError: false);
+        await RunGitAsync(repoPath, $"checkout {localBranch}", throwOnError: true);
+        await RunGitAsync(repoPath, $"pull origin {localBranch}", throwOnError: true);
 
         // Mark this repo as recently used
         TouchLastUsed(repoPath);
@@ -63,9 +71,9 @@ public class GitService : IGitService
         var source = sourceBranch.Replace("refs/heads/", "");
 
         _logger.LogInformation("Getting diff {Target}...{Source}", target, source);
-        await RunGitAsync(repoPath, $"fetch origin {target}");
+        await RunGitAsync(repoPath, $"fetch origin {target}", throwOnError: true);
 
-        return await RunGitAsync(repoPath, $"diff origin/{target}...{source}");
+        return await RunGitAsync(repoPath, $"diff origin/{target}...{source}", throwOnError: false);
     }
 
     private void TouchLastUsed(string repoPath)
@@ -127,7 +135,7 @@ public class GitService : IGitService
         }
     }
 
-    private async Task<string> RunGitAsync(string workingDirectory, string arguments)
+    private async Task<string> RunGitAsync(string workingDirectory, string arguments, bool throwOnError = false)
     {
         Directory.CreateDirectory(workingDirectory);
 
@@ -152,7 +160,13 @@ public class GitService : IGitService
         await process.WaitForExitAsync();
 
         if (process.ExitCode != 0)
+        {
             _logger.LogWarning("git {Args} exited with code {Code}: {Stderr}", arguments, process.ExitCode, stderr);
+
+            if (throwOnError)
+                throw new InvalidOperationException(
+                    $"git {arguments} failed (exit code {process.ExitCode}): {stderr.Trim()}");
+        }
 
         return stdout;
     }
